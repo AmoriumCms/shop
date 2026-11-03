@@ -79,6 +79,16 @@ export default ({ api, meta, fail, notify, hash, showList }) => ({
                 this.busy = false;
             }
         },
+        shipmentStatus(status) {
+            return {
+                created: this.t('Created'),
+                in_transit: this.t('In transit'),
+                out_for_delivery: this.t('Out for delivery'),
+                delivered: this.t('Delivered'),
+                exception: this.t('Exception'),
+                cancelled: this.t('Cancelled'),
+            }[status] || status;
+        },
         address(address) {
             if (!address || !Object.keys(address).length) {
                 return '—';
@@ -179,6 +189,14 @@ export default ({ api, meta, fail, notify, hash, showList }) => ({
                                 <label class="form-check-label" for="shop-notify">{{ t('Send an e-mail to the customer') }}</label>
                             </div>
                             <button class="btn btn-primary" :disabled="busy || !statusForm.status" @click="changeStatus">{{ t('Save') }}</button>
+                        </div>
+                        <div class="shop-panel" v-if="order.tracking_code || order.shipment_status">
+                            <h4>{{ t('Shipment') }}</h4>
+                            <div v-if="order.tracking_code">
+                                <a v-if="order.tracking_url" :href="order.tracking_url" target="_blank" rel="noopener">{{ order.tracking_code }}</a>
+                                <span v-else>{{ order.tracking_code }}</span>
+                            </div>
+                            <div v-if="order.shipment_status" class="small shop-muted">{{ shipmentStatus(order.shipment_status) }}</div>
                         </div>
                         <div class="shop-panel">
                             <h4>{{ t('Payments') }}</h4>

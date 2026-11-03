@@ -1,6 +1,8 @@
 <?php namespace AmoriumCms\Shop\Controllers\Api;
 
+use Url;
 use Request;
+use Cms\Facades\Cms;
 use Illuminate\Http\Response;
 use Illuminate\Http\RedirectResponse;
 use AmoriumCms\Shop\Classes\Payments\OmnipayMethod;
@@ -14,20 +16,32 @@ use AmoriumCms\Shop\Models\Payment;
 class GatewayController
 {
     /**
-     * returned sends the customer back to the order
+     * returned sends the customer back to the shop. The provider posts or redirects here,
+     * so this action never renders a page that would start a new browser session.
      */
     public function returned(string $code): RedirectResponse
     {
         $method = $this->method($code);
-        $payment = $method ? $this->payment($method, (string) Request::query('token'), (string) Request::query($method->referenceQuery())) : null;
+        $posted = request()->request->all() ?: (array) $_POST;
+        $referenceName = $method ? $method->referenceQuery() : 'paymentId';
+        $reference = (string) (Request::query($referenceName) ?: ($posted[$referenceName] ?? $posted['merchant_oid'] ?? $posted['conversationId'] ?? ''));
+        $providerToken = (string) ($posted['token'] ?? '');
+        $payment = $method ? $this->payment($method, (string) Request::query('token'), $reference, $providerToken) : null;
+        $gatewayMessage = OmnipayMethod::failureText($posted);
 
         if (!$method || !$payment) {
-            return redirect(\Url::to('/'));
+            return redirect($this->checkoutUrl($this->errorQuery($gatewayMessage)));
         }
 
-        $paid = $method->complete($payment, Request::query());
+        $paid = $method->complete($payment, Request::query(), $providerToken, $posted);
 
-        return redirect($method->orderUrl($payment->order, $paid ? ['placed' => 1] : []));
+        if (!$paid) {
+            $stored = trim((string) ($payment->fresh()->meta['return_error'] ?? ''));
+
+            return redirect($this->checkoutUrl($this->errorQuery($stored !== '' ? $stored : $gatewayMessage)));
+        }
+
+        return redirect($method->orderUrl($payment->order, ['placed' => 1]));
     }
 
     /**
@@ -62,16 +76,27 @@ class GatewayController
     /**
      * payment is the provider payment addressed by the return token
      */
-    protected function payment(OmnipayMethod $method, string $token, string $reference): ?Payment
+    protected function payment(OmnipayMethod $method, string $token, string $reference, string $providerToken = ''): ?Payment
     {
-        if ($token === '' || $reference === '') {
+        $payment = $reference !== ''
+            ? Payment::with('order')->where('method', $method->code())->where('reference', $reference)->first()
+            : null;
+
+        if (!$payment && $providerToken !== '') {
+            $payment = Payment::with('order')
+                ->where('method', $method->code())
+                ->where('status', Payment::STATUS_PENDING)
+                ->where('meta->provider_token', $providerToken)
+                ->first();
+        }
+
+        if (!$payment || !$payment->order) {
             return null;
         }
 
-        $payment = Payment::with('order')->where('method', $method->code())->where('reference', $reference)->first();
         $stored = (string) ($payment->meta['return_token'] ?? '');
 
-        if (!$payment || !$payment->order || $stored === '' || !hash_equals($stored, $token)) {
+        if ($token !== '' && ($stored === '' || !hash_equals($stored, $token))) {
             return null;
         }
 
@@ -80,5 +105,25 @@ class GatewayController
         }
 
         return $payment;
+    }
+
+    /**
+     * errorQuery marks the checkout as a failed return and carries the provider text
+     */
+    protected function errorQuery(string $message): array
+    {
+        $query = ['payment_error' => 1];
+        if ($message !== '') {
+            $query['payment_message'] = $message;
+        }
+
+        return $query;
+    }
+
+    protected function checkoutUrl(array $query = []): string
+    {
+        $url = Url::to(Cms::pageUrl('shop/checkout') ?: '/shop/checkout');
+
+        return $query ? $url . (str_contains($url, '?') ? '&' : '?') . http_build_query($query) : $url;
     }
 }

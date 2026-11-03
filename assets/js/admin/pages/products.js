@@ -13,6 +13,8 @@ export default ({ api, meta, fail, notify, hash, showList }) => ({
             colors: [],
             newColor: { name: '', hex: '' },
             categories: [],
+            tags: [],
+            newTag: '',
             specs: [],
             group: null,
             form: null,
@@ -64,10 +66,11 @@ export default ({ api, meta, fail, notify, hash, showList }) => ({
     },
     async mounted() {
         try {
-            const [brands, colors, categories, specs] = await Promise.all([api.get('brands'), api.get('colors'), api.get('categories'), api.get('specs')]);
+            const [brands, colors, categories, tags, specs] = await Promise.all([api.get('brands'), api.get('colors'), api.get('categories'), api.get('tags'), api.get('specs')]);
             this.brands = brands.data;
             this.colors = colors.data;
             this.categories = categories.data;
+            this.tags = tags.data;
             this.specs = specs.data;
         }
         catch (e) {
@@ -80,7 +83,7 @@ export default ({ api, meta, fail, notify, hash, showList }) => ({
     methods: {
         newGroup() {
             this.group = { id: null, images: [], products: [] };
-            this.form = { code: '', brand_id: null, color_id: null, primary_category_id: null, category_ids: [], is_active: true, translations: {} };
+            this.form = { code: '', brand_id: null, color_id: null, primary_category_id: null, category_ids: [], tag_ids: [], is_active: true, translations: {} };
             this.errors = {};
         },
         async loadGroup(id) {
@@ -99,6 +102,7 @@ export default ({ api, meta, fail, notify, hash, showList }) => ({
                 color_id: group.color_id,
                 primary_category_id: group.primary_category_id,
                 category_ids: [...group.category_ids],
+                tag_ids: [...(group.tag_ids || [])],
                 is_active: group.is_active,
                 translations: JSON.parse(JSON.stringify(group.translations || {})),
             };
@@ -162,6 +166,33 @@ export default ({ api, meta, fail, notify, hash, showList }) => ({
         toggleCategory(id) {
             const index = this.form.category_ids.indexOf(id);
             index >= 0 ? this.form.category_ids.splice(index, 1) : this.form.category_ids.push(id);
+        },
+        toggleTag(id) {
+            const index = this.form.tag_ids.indexOf(id);
+            index >= 0 ? this.form.tag_ids.splice(index, 1) : this.form.tag_ids.push(id);
+        },
+        async addTag() {
+            const name = this.newTag.trim();
+            if (!name) {
+                return;
+            }
+            this.busy = true;
+            try {
+                const created = (await api.post('tags', { name })).data;
+                if (!this.tags.some(tag => tag.id === created.id)) {
+                    this.tags.push(created);
+                }
+                if (!this.form.tag_ids.includes(created.id)) {
+                    this.form.tag_ids.push(created.id);
+                }
+                this.newTag = '';
+            }
+            catch (e) {
+                fail(e, this);
+            }
+            finally {
+                this.busy = false;
+            }
         },
 
         async uploadImages(event) {
@@ -398,6 +429,21 @@ export default ({ api, meta, fail, notify, hash, showList }) => ({
                                     <label class="form-check-label" :for="'cat' + category.id"><span class="shop-tree-indent" v-for="n in category.depth"></span>{{ category.name }}</label>
                                 </div>
                             </div>
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label">{{ t('Tags') }}</label>
+                            <div style="max-height: 160px; overflow: auto;">
+                                <div class="form-check" v-for="tag in tags" :key="tag.id">
+                                    <input class="form-check-input" type="checkbox" :id="'tag' + tag.id" :checked="form.tag_ids.includes(tag.id)" @change="toggleTag(tag.id)">
+                                    <label class="form-check-label" :for="'tag' + tag.id">{{ tag.name || tag.code }}</label>
+                                </div>
+                            </div>
+                            <field-error :errors="errors" name="tag_ids"></field-error>
+                            <div class="d-flex gap-2 mt-2">
+                                <input class="form-control" v-model="newTag" :placeholder="t('New tag')" @keydown.enter.prevent="addTag">
+                                <button type="button" class="btn btn-default" :disabled="busy" @click="addTag">{{ t('Add tag') }}</button>
+                            </div>
+                            <p class="help-block">{{ t('Product sections can show the products of a tag.') }}</p>
                         </div>
                         <div class="form-check form-switch">
                             <input class="form-check-input" type="checkbox" id="group-active" v-model="form.is_active">

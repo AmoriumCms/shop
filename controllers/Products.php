@@ -39,29 +39,26 @@ class Products extends BackendListPage
     }
 
     /**
-     * onImport stores the link and runs the pending imports in order
+     * onImport stores each pasted link and runs the pending imports in order
      */
     public function onImport()
     {
         $this->bootImport();
 
         try {
-            $job = $this->queueImport();
+            [$jobs, $skipped] = $this->queueImports();
         } catch (ImportException $exception) {
             Flash::error($exception->getMessage());
             return;
         }
 
         ImportQueue::drain();
-        $job->refresh();
 
-        if ($job->status === ImportJob::COMPLETED) {
-            Flash::success(__('The import has been completed.'));
-        } elseif ($job->status === ImportJob::FAILED) {
-            Flash::error(__('The import failed.'));
-        } else {
-            Flash::success(__('The link was added to the queue.'));
+        foreach ($jobs as $job) {
+            $job->refresh();
         }
+
+        $this->flashImportResult($jobs, $skipped);
 
         return Backend::redirect('amoriumcms/shop/products/import');
     }
@@ -78,12 +75,17 @@ class Products extends BackendListPage
     }
 
     /**
-     * queueImport stores the posted link when it is not already waiting
+     * queueImports stores each posted link that is not already waiting.
+     *
+     * @return array{0: ImportJob[], 1: string[]}
      */
-    protected function queueImport(): ImportJob
+    protected function queueImports(): array
     {
-        $url = trim((string) post('url'));
-        (new SourceRegistry)->match($url);
+        $urls = $this->postedUrls();
+
+        if ($urls === []) {
+            throw new ImportException(__('Enter at least one product link.'));
+        }
 
         $siteId = post('site_id');
         $siteId = $siteId === null || $siteId === '' ? null : (int) $siteId;
@@ -98,21 +100,111 @@ class Products extends BackendListPage
             throw new ImportException(__('The category was not found.'));
         }
 
-        $waiting = ImportJob::where('url', $url)
-            ->whereIn('status', [ImportJob::PENDING, ImportJob::PROCESSING])
-            ->exists();
+        $jobs = [];
+        $skipped = [];
+        $registry = new SourceRegistry;
 
-        if ($waiting) {
-            throw new ImportException(__('This link is already queued.'));
+        foreach ($urls as $url) {
+            try {
+                if (strlen($url) > 2048) {
+                    throw new ImportException(__('The product link is not a valid http address.'));
+                }
+
+                $registry->match($url);
+            } catch (ImportException $exception) {
+                $skipped[] = $url . ' — ' . $exception->getMessage();
+                continue;
+            }
+
+            $waiting = ImportJob::where('url', $url)
+                ->whereIn('status', [ImportJob::PENDING, ImportJob::PROCESSING])
+                ->exists();
+
+            if ($waiting) {
+                $skipped[] = $url . ' — ' . __('This link is already queued.');
+                continue;
+            }
+
+            $jobs[] = ImportJob::create([
+                'url' => $url,
+                'site_id' => $siteId,
+                'category_id' => $categoryId,
+                'status' => ImportJob::PENDING,
+                'backend_user_id' => BackendAuth::getUser()?->id,
+            ]);
         }
 
-        return ImportJob::create([
-            'url' => $url,
-            'site_id' => $siteId,
-            'category_id' => $categoryId,
-            'status' => ImportJob::PENDING,
-            'backend_user_id' => BackendAuth::getUser()?->id,
-        ]);
+        if ($jobs === []) {
+            throw new ImportException(implode(' ', $skipped));
+        }
+
+        return [$jobs, $skipped];
+    }
+
+    /**
+     * postedUrls reads one product link from each non-empty line
+     *
+     * @return string[]
+     */
+    protected function postedUrls(): array
+    {
+        $lines = preg_split('/\R/u', (string) post('urls')) ?: [];
+        $urls = [];
+
+        foreach ($lines as $line) {
+            $url = trim($line);
+
+            if ($url !== '') {
+                $urls[] = $url;
+            }
+        }
+
+        return $urls;
+    }
+
+    /**
+     * flashImportResult reports how the pasted links finished
+     *
+     * @param ImportJob[] $jobs
+     * @param string[] $skipped
+     */
+    protected function flashImportResult(array $jobs, array $skipped): void
+    {
+        foreach ($skipped as $message) {
+            Flash::error($message);
+        }
+
+        $completed = 0;
+        $failed = 0;
+        $queued = 0;
+
+        foreach ($jobs as $job) {
+            if ($job->status === ImportJob::COMPLETED) {
+                $completed++;
+            } elseif ($job->status === ImportJob::FAILED) {
+                $failed++;
+            } else {
+                $queued++;
+            }
+        }
+
+        if ($completed === 1) {
+            Flash::success(__('The import has been completed.'));
+        } elseif ($completed > 1) {
+            Flash::success(__(':count product links were imported.', ['count' => $completed]));
+        }
+
+        if ($failed === 1) {
+            Flash::error(__('The import failed.'));
+        } elseif ($failed > 1) {
+            Flash::error(__(':count product links failed.', ['count' => $failed]));
+        }
+
+        if ($queued === 1) {
+            Flash::success(__('The link was added to the queue.'));
+        } elseif ($queued > 1) {
+            Flash::success(__(':count product links were added to the queue.', ['count' => $queued]));
+        }
     }
 
     public function listExtendColumns($list)

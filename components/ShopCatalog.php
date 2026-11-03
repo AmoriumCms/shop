@@ -9,12 +9,21 @@ use AmoriumCms\Shop\Classes\CatalogQuery;
  * ShopCatalog renders a product listing on the server: every product, a category or a brand.
  * The search, sorting, filters and page are read from the query string, with the same
  * parameters as GET /products of the API.
+ *
+ * A full page load of ?page=N includes products from page 1 through N, so a shared or
+ * refreshed address matches what infinite scroll had already shown. onCatalogPage serves
+ * the same listing over AJAX: one page when `single` is posted, otherwise 1..N.
  */
 class ShopCatalog extends ComponentBase
 {
     const MODE_ALL = 'all';
     const MODE_CATEGORY = 'category';
     const MODE_BRAND = 'brand';
+
+    /**
+     * How many pages a refreshed address may render at once.
+     */
+    const MAX_INITIAL_PAGES = 20;
 
     /**
      * @var array params of the listing, as normalized by CatalogQuery
@@ -59,6 +68,58 @@ class ShopCatalog extends ComponentBase
 
     public function onRun()
     {
+        $input = $this->listingInput();
+
+        if ($input === null) {
+            return $this->notFound();
+        }
+
+        $this->loadListing($input, !$this->isSinglePageRequest());
+    }
+
+    /**
+     * onCatalogPage returns the listing markup for the storefront script.
+     * Post single=1 for the one page in the query string; otherwise pages 1..N.
+     */
+    public function onCatalogPage()
+    {
+        // AJAX handlers run before onRun, so the listing is loaded here.
+        $input = $this->listingInput();
+
+        if ($input === null) {
+            return $this->notFound();
+        }
+
+        $this->loadListing($input, !$this->isSinglePageRequest());
+
+        $loaded = (int) $this->page['loadedPage'];
+        $meta = $this->page['pagination'];
+
+        $payload = [
+            'cards' => $this->renderCards($this->page['products'] ?? []),
+            'page' => $loaded,
+            'lastPage' => (int) $meta['last_page'],
+            'total' => (int) $meta['total'],
+            'count' => trim($this->renderPartial('shop/catalog-count', ['count' => $meta['total']])),
+            'sort' => $this->params['sort'],
+            'q' => $this->params['q'] ?? '',
+        ];
+
+        if (!$this->isSinglePageRequest()) {
+            $payload['filters'] = $this->renderPartial('shop/filters', [
+                'showBrands' => $this->property('mode') !== self::MODE_BRAND,
+            ]);
+            $payload['empty'] = $this->renderPartial('shop/catalog-empty');
+        }
+
+        return $payload;
+    }
+
+    /**
+     * listingInput reads the query of this request and applies the category or brand of the page
+     */
+    protected function listingInput(): ?array
+    {
         $input = Request::query();
         unset($input['category'], $input['brand']);
 
@@ -67,14 +128,14 @@ class ShopCatalog extends ComponentBase
 
         if ($mode === self::MODE_CATEGORY) {
             if ($slug === '' || !$category = Storefront::category($slug)) {
-                return $this->notFound();
+                return null;
             }
             $input['category'] = $slug;
             $this->page['category'] = $category;
         }
         elseif ($mode === self::MODE_BRAND) {
             if ($slug === '' || !$brand = Storefront::brand($slug)) {
-                return $this->notFound();
+                return null;
             }
             $input['brand'] = $slug;
             $this->page['brand'] = $brand;
@@ -85,13 +146,70 @@ class ShopCatalog extends ComponentBase
 
         $input['per_page'] = (int) $this->property('perPage') ?: 24;
 
-        $this->params = CatalogQuery::normalize($input);
-        $result = Storefront::products($input);
+        return $input;
+    }
 
-        $this->page['products'] = $result['data'];
-        $this->page['pagination'] = $result['meta'];
+    /**
+     * loadListing fills the page with products. When $through is set, page N includes 1..N.
+     */
+    protected function loadListing(array $input, bool $through): void
+    {
+        $normalized = CatalogQuery::normalize($input);
+        $start = $through ? 1 : $normalized['page'];
+        $end = $through ? min($normalized['page'], $start + self::MAX_INITIAL_PAGES - 1) : $normalized['page'];
+
+        $products = [];
+        $meta = [
+            'page' => 1,
+            'per_page' => $normalized['per_page'],
+            'total' => 0,
+            'last_page' => 1,
+            'sort' => $normalized['sort'],
+        ];
+        $loaded = $start;
+
+        for ($page = $start; $page <= $end; $page++) {
+            $result = Storefront::products(array_merge($input, ['page' => $page]));
+            $products = array_merge($products, $result['data']);
+            $meta = $result['meta'];
+            $loaded = (int) $meta['page'];
+
+            if ($result['data'] === [] || $page >= $meta['last_page']) {
+                break;
+            }
+        }
+
+        $this->params = $normalized;
+        $this->params['page'] = $loaded;
+        $meta['page'] = $loaded;
+
+        $this->page['products'] = $products;
+        $this->page['pagination'] = $meta;
+        $this->page['loadedPage'] = $loaded;
         $this->page['filters'] = Storefront::filters($input);
         $this->page['params'] = $this->params;
+    }
+
+    /**
+     * renderCards
+     */
+    protected function renderCards(array $products): string
+    {
+        $html = '';
+
+        foreach ($products as $product) {
+            $html .= $this->renderPartial('shop/product-card', ['product' => $product]);
+        }
+
+        return $html;
+    }
+
+    /**
+     * isSinglePageRequest is an AJAX append of the one page named in the query string
+     */
+    protected function isSinglePageRequest(): bool
+    {
+        return Request::header('X-AJAX-HANDLER') === $this->alias . '::onCatalogPage' && post('single');
     }
 
     /**

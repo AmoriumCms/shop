@@ -15,3 +15,9 @@ v1.0.3:
 v1.0.4:
     - Rename the incomplete order status to payment_not_made
     - rename_incomplete_status.php
+v1.0.5:
+    - Copy the shipment tracking code, link and status onto the order
+    - add_order_tracking.php
+v1.0.6:
+    - Tags on products and the selected products section
+    - create_tags_table.php

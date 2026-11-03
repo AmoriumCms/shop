@@ -7,13 +7,14 @@
 
     <div class="shop-panel">
         <h4><?= e(__('Import product')) ?></h4>
-        <p class="shop-muted"><?= e(__('Paste a product page link. The links are imported one by one. The page waits until the queue has been processed.')) ?></p>
+        <p class="shop-muted"><?= e(__('Paste product page links, one per line. The links are imported one by one. The page waits until the queue has been processed.')) ?></p>
 
         <form method="POST" data-request="onImport" data-request-flash>
             <?= csrf_field() ?>
             <div class="mb-3">
-                <label class="form-label" for="import-url"><?= e(__('Product link')) ?></label>
-                <input id="import-url" type="url" name="url" class="form-control" required maxlength="2048" placeholder="https://www.trendyol.com/..." value="">
+                <label class="form-label" for="import-urls"><?= e(__('Product links')) ?></label>
+                <textarea id="import-urls" name="urls" class="form-control" rows="8" required placeholder="https://www.trendyol.com/...&#10;https://www.trendyol.com/..."></textarea>
+                <p class="help-block"><?= e(__('Enter one product link per line.')) ?></p>
             </div>
             <div class="mb-3">
                 <label class="form-label" for="import-category"><?= e(__('Category')) ?></label>

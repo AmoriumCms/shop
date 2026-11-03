@@ -143,6 +143,8 @@ class ProductGroupController extends AdminController
             'primary_category_id' => 'nullable|integer|exists:amoriumcms_shop_categories,id',
             'category_ids' => 'array',
             'category_ids.*' => 'integer|exists:amoriumcms_shop_categories,id',
+            'tag_ids' => 'array',
+            'tag_ids.*' => 'integer|exists:amoriumcms_shop_tags,id',
             'is_active' => 'boolean',
         ]);
 
@@ -192,6 +194,10 @@ class ProductGroupController extends AdminController
             $group->categories()->sync(array_values(array_unique(array_map('intval', $categoryIds))));
         }
 
+        if (array_key_exists('tag_ids', $data)) {
+            $group->tags()->sync(array_values(array_unique(array_map('intval', $data['tag_ids']))));
+        }
+
         return $group;
     }
 
@@ -234,6 +240,7 @@ class ProductGroupController extends AdminController
             'color.translations',
             'primary_category.translations',
             'categories.translations',
+            'tags',
             'images.image',
             'images.option.translations',
             'products.prices',
@@ -286,6 +293,7 @@ class ProductGroupController extends AdminController
             'color_id' => $group->color_id,
             'primary_category_id' => $group->primary_category_id,
             'category_ids' => $group->categories->pluck('id')->all(),
+            'tag_ids' => $group->tags->pluck('id')->all(),
             'translations' => (object) $group->translationsArray(),
             'images' => $group->images->map(fn ($image) => $this->presentImage($image))->values()->all(),
             'products' => $group->products->map(fn ($product) => [

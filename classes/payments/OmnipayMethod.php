@@ -119,6 +119,7 @@ class OmnipayMethod implements PaymentMethod, StartsPayment
         $payment->meta = [
             'checkout_url' => $url,
             'return_token' => $token,
+            'provider_token' => $data['token'] ?? null,
         ];
         $payment->save();
     }
@@ -126,7 +127,7 @@ class OmnipayMethod implements PaymentMethod, StartsPayment
     /**
      * complete marks the payment paid only after the provider confirms the amount
      */
-    public function complete(Payment $payment, array $query): bool
+    public function complete(Payment $payment, array $query, string $providerToken = '', ?array $posted = null): bool
     {
         $order = $payment->order;
 
@@ -141,7 +142,7 @@ class OmnipayMethod implements PaymentMethod, StartsPayment
         $data = match ($this->definition['flow']) {
             'checkout' => $this->fetch($order, $payment->reference),
             'direct' => $this->completeDirect($payment),
-            default => $this->fetchRedirect($order, $payment, (string) ($query['PayerID'] ?? $query['payer_id'] ?? '')),
+            default => $this->fetchRedirect($order, $payment, (string) ($query['PayerID'] ?? $query['payer_id'] ?? ''), $providerToken),
         };
 
         if (!$this->paid($order, $payment, $data)) {
@@ -151,10 +152,18 @@ class OmnipayMethod implements PaymentMethod, StartsPayment
                 'reference' => $payment->reference,
             ]);
 
+            if ($posted !== null) {
+                $message = static::failureText($posted + $data);
+                if ($message !== '') {
+                    $this->rememberError($payment, $message);
+                }
+            }
+
             return false;
         }
 
         $meta = (array) $payment->meta;
+        unset($meta['return_error']);
         if ($this->definition['flow'] === 'checkout') {
             $meta['payment_intent'] = $data['payment_intent'] ?? null;
         }
@@ -284,7 +293,7 @@ class OmnipayMethod implements PaymentMethod, StartsPayment
             'description' => __('Order :number', ['number' => $order->number]),
             'transactionId' => $order->number,
             'returnUrl' => $return,
-            'cancelUrl' => $this->orderUrl($order),
+            'cancelUrl' => $return . '&paymentId=' . rawurlencode((string) $order->number),
         ];
     }
 
@@ -371,7 +380,7 @@ class OmnipayMethod implements PaymentMethod, StartsPayment
     /**
      * fetchRedirect reads the payment and executes it when the customer has approved it
      */
-    protected function fetchRedirect(Order $order, Payment $payment, string $payerId): array
+    protected function fetchRedirect(Order $order, Payment $payment, string $payerId, string $providerToken = ''): array
     {
         $data = $this->fetch($order, $payment->reference);
 
@@ -384,6 +393,9 @@ class OmnipayMethod implements PaymentMethod, StartsPayment
             if ($payerId !== '') {
                 $parameters['payerId'] = $payerId;
             }
+            if ($providerToken !== '') {
+                $parameters['token'] = $providerToken;
+            }
             $response = $this->gateway()->completePurchase($parameters)->send();
         }
         catch (\Throwable $exception) {
@@ -393,8 +405,10 @@ class OmnipayMethod implements PaymentMethod, StartsPayment
                 'error' => $exception->getMessage(),
             ]);
 
-            return [];
+            return ['errorMessage' => ''];
         }
+
+        $data = is_array($response->getData()) ? $response->getData() : [];
 
         if (!$response->isSuccessful()) {
             Log::warning('The gateway payment could not be executed.', [
@@ -403,10 +417,56 @@ class OmnipayMethod implements PaymentMethod, StartsPayment
                 'error' => $response->getMessage(),
             ]);
 
-            return [];
+            $data['errorMessage'] = $data['errorMessage'] ?? $response->getMessage();
+
+            return $data;
         }
 
-        return is_array($response->getData()) ? $response->getData() : [];
+        return $data;
+    }
+
+    /**
+     * failureText is the provider's own explanation, taken from the return or the provider response
+     */
+    public static function failureText(array $fields): string
+    {
+        $keys = ['failed_reason_msg', 'fail_message', 'mderrormsg', 'errormessage', 'err_msg', 'error_message', 'bank_message', 'reason'];
+        $flat = [];
+        foreach ($fields as $key => $value) {
+            if (is_scalar($value)) {
+                $flat[strtolower((string) $key)] = $value;
+            }
+        }
+
+        foreach ($keys as $key) {
+            $message = static::plain($flat[$key] ?? '');
+            if ($message !== '' && !in_array(strtolower($message), ['failed', 'failure', 'error', 'success'], true)) {
+                return $message;
+            }
+        }
+
+        return '';
+    }
+
+    /**
+     * rememberError keeps the provider message until the customer tries again
+     */
+    protected function rememberError(Payment $payment, string $message): void
+    {
+        $meta = (array) $payment->meta;
+        $meta['return_error'] = $message;
+        $payment->meta = $meta;
+        $payment->save();
+    }
+
+    /**
+     * plainMessage is a single line safe to show on the checkout page
+     */
+    protected static function plain($value): string
+    {
+        $text = trim((string) preg_replace('/\s+/u', ' ', strip_tags((string) $value)));
+
+        return mb_strlen($text) > 300 ? mb_substr($text, 0, 300) : $text;
     }
 
     /**

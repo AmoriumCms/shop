@@ -37,6 +37,13 @@ class ProductGroup extends Model
             'key' => 'group_id',
             'otherKey' => 'category_id',
         ],
+        'tags' => [
+            Tag::class,
+            'table' => 'amoriumcms_shop_group_tag',
+            'key' => 'group_id',
+            'otherKey' => 'tag_id',
+            'order' => 'amoriumcms_shop_tags.sort_order',
+        ],
     ];
 
     /**
@@ -91,5 +98,6 @@ class ProductGroup extends Model
     public function afterDelete()
     {
         $this->categories()->detach();
+        $this->tags()->detach();
     }
 }

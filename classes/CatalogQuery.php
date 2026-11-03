@@ -5,6 +5,7 @@ use App;
 use Site;
 use AmoriumCms\Shop\Models\Spec;
 use AmoriumCms\Shop\Models\Brand;
+use AmoriumCms\Shop\Models\Order;
 use AmoriumCms\Shop\Models\Category;
 use AmoriumCms\Shop\Models\ProductGroup;
 use AmoriumCms\Shop\Models\ProductPrice;
@@ -14,14 +15,17 @@ use AmoriumCms\Shop\Models\ProductGroupTranslation;
  * CatalogQuery lists the product groups of the active site. A group is listed when at least
  * one of its barcodes is active, has a price on the site and matches every filter.
  *
- * Parameters: category, brand, q, price_min, price_max, sort, filter[spec_code]
+ * Parameters: category, brand, tag, ids, q, price_min, price_max, sort, filter[spec_code]
+ * - ids lists group ids and keeps their order: ids=12,5,8
  * - select spec: filter[color]=red,blue
  * - number spec: filter[ram][min]=8&filter[ram][max]=32
  * - boolean spec: filter[wifi]=1
  */
 class CatalogQuery
 {
-    const SORTS = ['newest', 'price_asc', 'price_desc', 'name'];
+    const SORTS = ['newest', 'price_asc', 'price_desc', 'name', 'best_selling'];
+
+    const MAX_PER_PAGE = 48;
 
     /**
      * @var array params
@@ -46,10 +50,16 @@ class CatalogQuery
     {
         $params = [];
 
-        foreach (['category', 'brand', 'q'] as $key) {
+        foreach (['category', 'brand', 'tag', 'q'] as $key) {
             if (isset($input[$key]) && is_string($input[$key]) && trim($input[$key]) !== '') {
                 $params[$key] = mb_substr(trim($input[$key]), 0, 100);
             }
+        }
+
+        $ids = is_string($input['ids'] ?? null) ? explode(',', $input['ids']) : (array) ($input['ids'] ?? []);
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids), fn ($id) => $id > 0)));
+        if ($ids) {
+            $params['ids'] = array_slice($ids, 0, static::MAX_PER_PAGE);
         }
 
         foreach (['price_min', 'price_max'] as $key) {
@@ -60,7 +70,7 @@ class CatalogQuery
 
         $params['sort'] = in_array($input['sort'] ?? null, static::SORTS, true) ? $input['sort'] : 'newest';
         $params['page'] = max(1, (int) ($input['page'] ?? 1));
-        $params['per_page'] = min(48, max(1, (int) ($input['per_page'] ?? 24)));
+        $params['per_page'] = min(static::MAX_PER_PAGE, max(1, (int) ($input['per_page'] ?? 24)));
 
         $filters = [];
         foreach ((array) ($input['filter'] ?? []) as $code => $value) {
@@ -185,6 +195,19 @@ class CatalogQuery
             $query->where('brand_id', $brand?->id ?: 0);
         }
 
+        if ($code = $this->params['tag'] ?? null) {
+            $query->whereExists(function ($q) use ($code) {
+                $q->from('amoriumcms_shop_group_tag as gt')
+                    ->join('amoriumcms_shop_tags as tg', 'tg.id', '=', 'gt.tag_id')
+                    ->whereColumn('gt.group_id', 'amoriumcms_shop_product_groups.id')
+                    ->where('tg.code', $code);
+            });
+        }
+
+        if ($ids = $this->params['ids'] ?? null) {
+            $query->whereIn('amoriumcms_shop_product_groups.id', $ids);
+        }
+
         if ($search = $this->params['q'] ?? null) {
             $like = '%' . str_replace(['%', '_'], ['\%', '\_'], $search) . '%';
 
@@ -262,7 +285,23 @@ class CatalogQuery
     {
         $sort = $this->params['sort'];
 
-        if ($sort === 'price_asc' || $sort === 'price_desc') {
+        if ($ids = $this->params['ids'] ?? null) {
+            $query->orderByRaw('field(amoriumcms_shop_product_groups.id, ' . implode(', ', $ids) . ')');
+            return;
+        }
+
+        if ($sort === 'best_selling') {
+            $query->addSelect(['sold_quantity' => function ($q) {
+                $q->from('amoriumcms_shop_order_items as oi')
+                    ->join('amoriumcms_shop_orders as o', 'o.id', '=', 'oi.order_id')
+                    ->whereColumn('oi.group_id', 'amoriumcms_shop_product_groups.id')
+                    ->whereNotIn('o.status', Order::NOT_COUNTED)
+                    ->selectRaw('coalesce(sum(oi.quantity), 0)');
+            }]);
+
+            $query->orderBy('sold_quantity', 'desc');
+        }
+        elseif ($sort === 'price_asc' || $sort === 'price_desc') {
             $query->addSelect(['min_price' => function ($q) {
                 $q->from('amoriumcms_shop_products as p')
                     ->join('amoriumcms_shop_product_prices as pp', 'pp.product_id', '=', 'p.id')

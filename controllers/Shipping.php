@@ -1,27 +1,17 @@
 <?php namespace AmoriumCms\Shop\Controllers;
 
-use AmoriumCms\Shop\Classes\BackendListPage;
+use Backend;
+use Backend\Classes\Controller;
 
 /**
- * Shipping lists the shipping methods with their rates. Methods are edited in the Vue page.
+ * Shipping redirects the old list address to the shipping settings page.
  */
-class Shipping extends BackendListPage
+class Shipping extends Controller
 {
     public $requiredPermissions = ['shop.settings.manage'];
 
-    protected $section = 'shipping';
-
-    protected $title = 'Shipping Methods';
-
-    protected $newLabel = 'New shipping method';
-
-    public function listExtendColumns($list)
+    public function index()
     {
-        $list->getColumn('name')->sqlSelect($this->translatedSelect('amoriumcms_shop_shipping_method_translations', 'shipping_method_id'));
-    }
-
-    public function listExtendQuery($query)
-    {
-        $query->with('rates');
+        return Backend::redirect('amoriumcms/shipping/shipping');
     }
 }

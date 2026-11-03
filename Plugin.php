@@ -2,6 +2,7 @@
 
 use App;
 use Lang;
+use Event;
 use Backend;
 use System\Classes\PluginBase;
 use System\Classes\SettingsManager;
@@ -44,6 +45,8 @@ class Plugin extends PluginBase
             Lang::addJsonPath(plugins_path('amoriumcms/shop/lang'));
         }
 
+        Event::listen('amorium.sections.basePaths', fn () => plugins_path('amoriumcms/shop/data/sections.json'));
+
         User::extend(function ($model) {
             $model->hasOne['shop_customer'] = [Customer::class, 'key' => 'user_id', 'delete' => true];
             $model->hasMany['shop_addresses'] = [Address::class, 'key' => 'user_id', 'delete' => true];
@@ -63,6 +66,15 @@ class Plugin extends PluginBase
             \AmoriumCms\Shop\Components\ShopConfig::class => 'shopConfig',
             \AmoriumCms\Shop\Components\ShopCatalog::class => 'shopCatalog',
             \AmoriumCms\Shop\Components\ShopProduct::class => 'shopProduct',
+        ];
+    }
+
+    public function registerMarkupTags()
+    {
+        return [
+            'functions' => [
+                'shopProducts' => [\AmoriumCms\Shop\Classes\SectionProducts::class, 'list'],
+            ],
         ];
     }
 
@@ -101,7 +113,7 @@ class Plugin extends PluginBase
                     'specs' => ['label' => 'Specs', 'icon' => 'icon-list-ul', 'url' => $url('specs'), 'permissions' => ['shop.catalog.manage']],
                     'reviews' => ['label' => 'Reviews', 'icon' => 'icon-star', 'url' => $url('reviews'), 'permissions' => ['shop.reviews.moderate']],
                     'customers' => ['label' => 'Customers', 'icon' => 'icon-users', 'url' => $url('customers'), 'permissions' => ['shop.customers.view']],
-                    'shipping' => ['label' => 'Shipping Methods', 'icon' => 'icon-truck', 'url' => $url('shipping'), 'permissions' => ['shop.settings.manage']],
+                    'shipping' => ['label' => 'Shipping', 'icon' => 'icon-truck', 'url' => Backend::url('amoriumcms/shipping/shipping'), 'permissions' => ['shop.settings.manage']],
                     'payments' => ['label' => 'Payment Methods', 'icon' => 'icon-credit-card', 'url' => $url('shop/payments'), 'permissions' => ['shop.settings.manage']],
                     'settings' => ['label' => 'Settings', 'icon' => 'icon-cog', 'url' => $url('shop/settings'), 'permissions' => ['shop.settings.manage']],
                 ],

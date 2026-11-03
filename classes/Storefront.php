@@ -4,7 +4,6 @@ use AmoriumCms\Shop\Models\Brand;
 use AmoriumCms\Shop\Models\Review;
 use AmoriumCms\Shop\Models\Category;
 use AmoriumCms\Shop\Models\ProductGroup;
-use AmoriumCms\Shop\Models\ShippingMethod;
 
 /**
  * Storefront reads the catalog of the active site through the cache. The API and the
@@ -19,8 +18,9 @@ class Storefront
     public static function products(array $input): array
     {
         $params = CatalogQuery::normalize($input);
+        $seconds = $params['sort'] === 'best_selling' ? 900 : 3600;
 
-        return CatalogCache::remember('products', $params, 3600, function () use ($params) {
+        return CatalogCache::remember('products', $params, $seconds, function () use ($params) {
             $page = (new CatalogQuery($params))->paginate();
 
             return [
@@ -152,16 +152,18 @@ class Storefront
     }
 
     /**
-     * shippingMethods lists the methods with their base price on the active site
+     * shippingMethods lists the site shipping fee. The free-shipping limit is applied at checkout.
      */
     public static function shippingMethods(): array
     {
         return CatalogCache::remember('shipping-methods', [], 3600, function () {
-            return ShippingMethod::available()
-                ->get()
-                ->map(fn ($method) => Presenter::shippingMethod($method))
-                ->values()
-                ->all();
+            if (!class_exists(\AmoriumCms\Shipping\Classes\ShippingQuote::class)) {
+                return [];
+            }
+
+            $quote = \AmoriumCms\Shipping\Classes\ShippingQuote::catalog();
+
+            return $quote ? [$quote] : [];
         });
     }
 

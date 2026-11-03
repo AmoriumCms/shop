@@ -25,6 +25,14 @@ columns:
         type: partial
         path: $/amoriumcms/shop/views/admin/columns/_payment.php
 
+    shipping:
+        label: Shipping
+        type: partial
+        path: $/amoriumcms/shipping/views/column.php
+        clickable: false
+        sortable: false
+        searchable: false
+
     items:
         label: Products
         relation: items

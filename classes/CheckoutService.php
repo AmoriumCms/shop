@@ -17,7 +17,6 @@ use AmoriumCms\Shop\Models\Address;
 use AmoriumCms\Shop\Models\Payment;
 use AmoriumCms\Shop\Models\OrderItem;
 use AmoriumCms\Shop\Models\ShopSetting;
-use AmoriumCms\Shop\Models\ShippingMethod;
 
 /**
  * CheckoutService runs the one page checkout: the selections are saved on the cart with
@@ -33,9 +32,16 @@ class CheckoutService
         $totals = CartService::totals($cart);
         $user = Auth::user();
 
-        $shippingMethods = ShippingMethod::available()->get()->map(
-            fn ($method) => Presenter::shippingMethod($method, $method->priceFor($totals['subtotal']))
-        )->values()->all();
+        $shipping = class_exists(\AmoriumCms\Shipping\Classes\ShippingQuote::class)
+            ? \AmoriumCms\Shipping\Classes\ShippingQuote::present($totals['subtotal'], static::shippingCountry($cart))
+            : [
+                'name' => __('Shipping'),
+                'price' => null,
+                'free_over' => null,
+                'currency' => Presenter::currency(),
+                'available' => false,
+                'message' => __('Shipping is not available.'),
+            ];
 
         return [
             'cart' => CartService::present($cart),
@@ -53,12 +59,28 @@ class CheckoutService
                 'payment_method' => $cart->payment_method,
                 'customer_note' => $cart->customer_note,
             ],
-            'shipping_methods' => $shippingMethods,
+            'shipping' => $shipping,
             'payment_methods' => array_values(array_map(
                 fn ($method) => PaymentMethods::present($method),
                 PaymentMethods::available()
             )),
+            'payment_error' => static::paymentError($cart),
         ];
+    }
+
+    /**
+     * paymentError is the message the card provider returned for this cart
+     */
+    protected static function paymentError(Cart $cart): ?string
+    {
+        $payment = Payment::where('status', Payment::STATUS_PENDING)
+            ->whereIn('order_id', Order::where('cart_id', $cart->id)->select('id'))
+            ->orderBy('id', 'desc')
+            ->first();
+
+        $message = trim((string) ($payment->meta['return_error'] ?? ''));
+
+        return $message !== '' ? $message : null;
     }
 
     /**
@@ -129,14 +151,6 @@ class CheckoutService
             }
         }
 
-        if (array_key_exists('shipping_method_id', $data)) {
-            if ($data['shipping_method_id'] && !ShippingMethod::available()->find($data['shipping_method_id'])) {
-                throw ApiException::make(ApiCode::SHIPPING_METHOD_UNAVAILABLE);
-            }
-
-            $cart->shipping_method_id = $data['shipping_method_id'];
-        }
-
         if (array_key_exists('payment_method', $data)) {
             if ($data['payment_method'] && !isset(PaymentMethods::available()[$data['payment_method']])) {
                 throw ApiException::make(ApiCode::PAYMENT_METHOD_UNAVAILABLE);
@@ -179,17 +193,16 @@ class CheckoutService
 
         [$shippingAddress, $billingAddress, $email, $phone] = static::addresses($cart, $user);
 
-        $shippingMethod = $cart->shipping_method_id ? ShippingMethod::available()->find($cart->shipping_method_id) : null;
-        if (!$shippingMethod) {
-            throw ApiException::make(ApiCode::SHIPPING_METHOD_UNAVAILABLE);
+        $totals = CartService::totals($cart);
+        if ($totals['shipping_total'] === null) {
+            throw ApiException::make(ApiCode::SHIPPING_METHOD_UNAVAILABLE, null, __('Shipping is not available.'));
         }
+        static::assertShippingCountry($shippingAddress);
 
         $paymentMethod = PaymentMethods::available()[$cart->payment_method] ?? null;
         if (!$paymentMethod) {
             throw ApiException::make(ApiCode::PAYMENT_METHOD_UNAVAILABLE);
         }
-
-        $totals = CartService::totals($cart);
 
         $unavailable = array_filter($totals['lines'], fn ($line) => !$line['available']);
         if ($unavailable) {
@@ -206,12 +219,14 @@ class CheckoutService
             throw ApiException::make(ApiCode::PRICE_CHANGED, ['cart' => CartService::present($cart)]);
         }
 
-        $order = OutOfStockGuard::run($cart, function () use ($cart, $user, $totals, $shippingMethod, $paymentMethod, $shippingAddress, $billingAddress, $email, $phone, $idempotencyKey) {
-            return Db::transaction(function () use ($cart, $user, $totals, $shippingMethod, $paymentMethod, $shippingAddress, $billingAddress, $email, $phone, $idempotencyKey) {
+        $order = OutOfStockGuard::run($cart, function () use ($cart, $user, $totals, $paymentMethod, $shippingAddress, $billingAddress, $email, $phone, $idempotencyKey) {
+            return Db::transaction(function () use ($cart, $user, $totals, $paymentMethod, $shippingAddress, $billingAddress, $email, $phone, $idempotencyKey) {
                 $cart = Cart::lockForUpdate()->find($cart->id);
                 if ($cart->order_id) {
                     throw ApiException::make(ApiCode::CART_NOT_FOUND);
                 }
+
+                static::replaceUnpaidAttempt($cart);
 
                 $order = Order::where('cart_id', $cart->id)->where('status', Order::STATUS_PAYMENT_NOT_MADE)->first() ?: new Order;
                 $wasDraft = $order->exists;
@@ -225,8 +240,8 @@ class CheckoutService
                     'status' => $paymentMethod->orderStatus(),
                     'payment_status' => Order::PAYMENT_PENDING,
                     'payment_method' => $paymentMethod->code(),
-                    'shipping_method_id' => $shippingMethod->id,
-                    'shipping_method_name' => $shippingMethod->trans('name'),
+                    'shipping_method_id' => null,
+                    'shipping_method_name' => $totals['shipping_name'],
                     'subtotal' => $totals['subtotal'],
                     'tax_total' => $totals['tax_total'],
                     'shipping_total' => $totals['shipping_total'] ?? '0.00',
@@ -263,8 +278,10 @@ class CheckoutService
 
                 OrderService::record($order, $wasDraft ? Order::STATUS_PAYMENT_NOT_MADE : null, $order->status);
 
-                $cart->order_id = $order->id;
-                $cart->save();
+                if (!$paymentMethod instanceof StartsPayment) {
+                    $cart->order_id = $order->id;
+                    $cart->save();
+                }
 
                 return $order;
             });
@@ -291,6 +308,10 @@ class CheckoutService
                 return;
             }
 
+            if (Order::where('cart_id', $cart->id)->where('payment_status', Order::PAYMENT_PENDING)->whereNotIn('status', [Order::STATUS_PAYMENT_NOT_MADE, Order::STATUS_CANCELLED, Order::STATUS_REFUNDED])->exists()) {
+                return;
+            }
+
             $order = Order::where('cart_id', $cart->id)->where('status', Order::STATUS_PAYMENT_NOT_MADE)->first();
 
             if (!$cart->items()->exists()) {
@@ -312,7 +333,6 @@ class CheckoutService
             }
 
             $totals = CartService::totals($cart);
-            $shippingMethod = $totals['shipping_method'];
 
             $isNew = !$order;
             $order = $order ?: new Order(['cart_id' => $cart->id, 'status' => Order::STATUS_PAYMENT_NOT_MADE, 'payment_status' => Order::PAYMENT_PENDING]);
@@ -323,8 +343,8 @@ class CheckoutService
                 'locale' => App::getLocale(),
                 'currency' => Presenter::currency(),
                 'payment_method' => (string) $cart->payment_method,
-                'shipping_method_id' => $shippingMethod?->id,
-                'shipping_method_name' => $shippingMethod?->trans('name'),
+                'shipping_method_id' => null,
+                'shipping_method_name' => $totals['shipping_name'],
                 'subtotal' => $totals['subtotal'],
                 'tax_total' => $totals['tax_total'],
                 'shipping_total' => $totals['shipping_total'] ?? '0.00',
@@ -347,6 +367,24 @@ class CheckoutService
                 OrderService::record($order, null, Order::STATUS_PAYMENT_NOT_MADE);
             }
         });
+    }
+
+    /**
+     * replaceUnpaidAttempt cancels a card payment that was left unfinished, so a second
+     * attempt reserves the stock once and the cart stays open until the new payment is confirmed.
+     */
+    protected static function replaceUnpaidAttempt(Cart $cart)
+    {
+        $pending = Order::where('cart_id', $cart->id)
+            ->where('payment_status', Order::PAYMENT_PENDING)
+            ->whereNotIn('status', [Order::STATUS_PAYMENT_NOT_MADE, Order::STATUS_CANCELLED, Order::STATUS_REFUNDED])
+            ->get();
+
+        foreach ($pending as $order) {
+            if ($order->canMoveTo(Order::STATUS_CANCELLED)) {
+                OrderService::changeStatus($order, Order::STATUS_CANCELLED, __('Replaced by a new payment attempt.'));
+            }
+        }
     }
 
     /**
@@ -435,6 +473,33 @@ class CheckoutService
         }
 
         return [$cart->guest_shipping_address, $cart->guest_billing_address, $cart->email, $cart->guest_shipping_address['phone'] ?? null];
+    }
+
+    /**
+     * shippingCountry is the destination used to apply the excluded-country list
+     */
+    protected static function shippingCountry(Cart $cart): ?string
+    {
+        if ($cart->user_id && $cart->shipping_address_id) {
+            return Address::where('user_id', $cart->user_id)->find($cart->shipping_address_id)?->country_code;
+        }
+
+        return $cart->guest_shipping_address['country_code'] ?? null;
+    }
+
+    /**
+     * assertShippingCountry
+     */
+    protected static function assertShippingCountry(array $address): void
+    {
+        if (!class_exists(\AmoriumCms\Shipping\Classes\ShippingQuote::class)) {
+            return;
+        }
+        if (\AmoriumCms\Shipping\Classes\ShippingQuote::allowsCountry($address['country_code'] ?? null)) {
+            return;
+        }
+
+        throw ApiException::validation(['shipping' => [__('We cannot ship to this country.')]]);
     }
 
     /**
